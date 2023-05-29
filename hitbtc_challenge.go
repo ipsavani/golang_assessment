@@ -3,7 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
+	"log"
+	"net/url"
 	"sync"
 	"time"
 
@@ -23,135 +24,269 @@ type Currency struct {
 	FeeCurrency string `json:"feeCurrency"`
 }
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-}
-
-// Store the currency data in a concurrent-safe map
-var currencyData sync.Map
-
-// func (cur *Currency, id, fullname) UpdateSymbolData() {
-// 	cur.ID = id
-// 	cur.FullName = fullname
-// }
-
-// func (cur *Currency, ask, bid, last, low, high, open) UpdatetickData() {
-// 	cur.Ask = ask
-// 	cur.Bid = bid
-// 	cur.Last = last
-// 	cur.Low = low
-// 	cur.High = high
-// 	cur.Open = open
-// }
+var currencies map[string]Currency
+var mutex = &sync.Mutex{}
 
 func main() {
-	go func() {
-		// // Connect to the HitBTC WebSocket
-		// c, _, err := websocket.DefaultDialer.Dial("wss://api.hitbtc.com/api/3/ws", nil)
-		// if err != nil {
-		// 	panic(err)
-		// }
-		dialer := websocket.Dialer{
-			HandshakeTimeout: 45 * time.Second,
-		}
+	currencies = make(map[string]Currency)
+	// Supported symbols
+	// symbols := []string{"BTCUSD", "ETHBTC"}
 
-		c, resp, err := dialer.Dial("wss://api.hitbtc.com/api/2/ws/public", nil)
+	u := url.URL{Scheme: "wss", Host: "api.hitbtc.com", Path: "/api/2/ws"}
+
+	// Initialize and maintain WebSocket connection
+	go func() {
+		var feeCurrencyy string
+		var idd string
+		var fullNamee string
+		c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+		fmt.Printf("c = %T\n", c)
+
 		if err != nil {
-			fmt.Println("Error during handshake:", err)
-			if resp != nil {
-				fmt.Println("HTTP Response Status:", resp.Status)
-				fmt.Println("HTTP Response Headers:", resp.Header)
-			}
-			return
+			log.Fatal("dial:", err)
 		}
-		// fmt.Println("handshake succesful")
 		defer c.Close()
 
-		// Subscribe to the ticker for each currency pair
-		for _, pair := range []string{"BTCUSD", "ETHBTC"} {
-			subscribeMessage := map[string]interface{}{
-				"method": "subscribeTicker",
-				"params": map[string]string{
-					"symbol": pair,
-				},
-				// "id": 123,
-			}
-			c.WriteJSON(subscribeMessage)
+		// get symbol
+		symbolMessage := map[string]interface{}{
+			"method": "getSymbol",
+			"params": map[string]string{
+				"symbol": "ETHBTC",
+			},
+			"id": time.Now().Unix(),
+		}
+		c.WriteJSON(symbolMessage)
+
+		_, r1message, r1err := c.ReadMessage()
+		if r1err != nil {
+			log.Println("read:", err)
+			return
 		}
 
-		// Handle incoming messages
+		var r1 map[string]interface{}
+		json.Unmarshal(r1message, &r1)
+		res, ok := r1["result"].(map[string]interface{})
+		if !ok {
+			fmt.Println("failed to parse params 1 eth")
+		}
+		if res != nil {
+			mutex.Lock()
+			feeCurrencyy = res["feeCurrency"].(string)
+			mutex.Unlock()
+		}
+		//*******************************************************************
+		// get currency
+		currencyMessage := map[string]interface{}{
+			"method": "getCurrency",
+			"params": map[string]string{
+				"currency": res["baseCurrency"].(string),
+			},
+			"id": time.Now().Unix(),
+		}
+		c.WriteJSON(currencyMessage)
+
+		_, r2message, r2err := c.ReadMessage()
+		if r2err != nil {
+			log.Println("read:", err)
+			return
+		}
+		var r2 map[string]interface{}
+		json.Unmarshal(r2message, &r2)
+		res2, ok := r2["result"].(map[string]interface{})
+		if !ok {
+			fmt.Println("failed to parse params 2 eth")
+		}
+		if res != nil {
+			mutex.Lock()
+			idd = res2["id"].(string)
+			fullNamee = res2["fullName"].(string)
+			mutex.Unlock()
+		}
+		//**********************************************************************
+		// Subscribe to the market data for each symbol
+		subscriptionMessage := map[string]interface{}{
+			"method": "subscribeTicker",
+			"params": map[string]string{
+				"symbol": "ETHBTC",
+			},
+			"id": time.Now().Unix(),
+		}
+		c.WriteJSON(subscriptionMessage)
+
+		// Store real-time data in memory
 		for {
 			_, message, err := c.ReadMessage()
-			// fmt.Println(message)
 			if err != nil {
-				panic(err)
+				log.Println("read:", err)
+				return
 			}
 
-			// Parse the JSON message into a Currency object
 			var result map[string]interface{}
 			json.Unmarshal(message, &result)
-			fmt.Println(result)
+
 			params, ok := result["params"].(map[string]interface{})
 			if !ok {
-				// Log the error, ignore this message, or handle the error in some other way.
-				fmt.Println("Failed to parse params")
-				continue // Skip to the next iteration of the loop.
+				fmt.Println("failed to parse params 3 eth")
+				continue
 			}
-			currency := Currency{
-				ID:   params["symbol"].(string),
-				Ask:  params["ask"].(string),
-				Bid:  params["bid"].(string),
-				Last: params["last"].(string),
-				Open: params["open"].(string),
-				Low:  params["low"].(string),
-				High: params["high"].(string),
-				// FeeCurrency: params["feeCurrency"].(string),
+			if params != nil {
+				mutex.Lock()
+				currencies[params["symbol"].(string)] = Currency{
+					ID:          idd,
+					FullName:    fullNamee,
+					Ask:         params["ask"].(string),
+					Bid:         params["bid"].(string),
+					Last:        params["last"].(string),
+					Open:        params["open"].(string),
+					Low:         params["low"].(string),
+					High:        params["high"].(string),
+					FeeCurrency: feeCurrencyy,
+				}
+				mutex.Unlock()
 			}
-
-			// Store the currency data in the map
-			currencyData.Store(currency.ID, currency)
 		}
 	}()
 
-	r := gin.Default()
-	r.GET("/currency/:symbol", handleCurrencySymbol)
-	r.GET("/currency/all", handleCurrencyAll)
+	//****************************************************************************************************************************************
+	go func() {
+		var feeCurrencyy string
+		var idd string
+		var fullNamee string
+		c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+		fmt.Printf("c = %T\n", c)
 
-	r.Run() // listens and serves on 0.0.0.0:8080
+		if err != nil {
+			log.Fatal("dial:", err)
+		}
+		defer c.Close()
+
+		// get symbol
+		symbolMessage := map[string]interface{}{
+			"method": "getSymbol",
+			"params": map[string]string{
+				"symbol": "BTCUSD",
+			},
+			"id": time.Now().Unix(),
+		}
+		c.WriteJSON(symbolMessage)
+
+		_, r1message, r1err := c.ReadMessage()
+		if r1err != nil {
+			log.Println("read:", err)
+			return
+		}
+
+		var r1 map[string]interface{}
+		json.Unmarshal(r1message, &r1)
+		res, ok := r1["result"].(map[string]interface{})
+		if !ok {
+			fmt.Println("failed to parse params 1")
+		}
+		if res != nil {
+			mutex.Lock()
+			feeCurrencyy = res["feeCurrency"].(string)
+			mutex.Unlock()
+		}
+		//*******************************************************************
+		// get currency
+		currencyMessage := map[string]interface{}{
+			"method": "getCurrency",
+			"params": map[string]string{
+				"currency": res["baseCurrency"].(string),
+			},
+			"id": time.Now().Unix(),
+		}
+		c.WriteJSON(currencyMessage)
+
+		_, r2message, r2err := c.ReadMessage()
+		if r2err != nil {
+			log.Println("read:", err)
+			return
+		}
+		var r2 map[string]interface{}
+		json.Unmarshal(r2message, &r2)
+		res2, ok := r2["result"].(map[string]interface{})
+		if !ok {
+			fmt.Println("failed to parse params 2")
+		}
+		if res != nil {
+			mutex.Lock()
+			idd = res2["id"].(string)
+			fullNamee = res2["fullName"].(string)
+			mutex.Unlock()
+		}
+		//**********************************************************************
+		// Subscribe to the market data for each symbol
+		subscriptionMessage := map[string]interface{}{
+			"method": "subscribeTicker",
+			"params": map[string]string{
+				"symbol": "BTCUSD",
+			},
+			"id": time.Now().Unix(),
+		}
+		c.WriteJSON(subscriptionMessage)
+
+		// Store real-time data in memory
+		for {
+			_, message, err := c.ReadMessage()
+			if err != nil {
+				log.Println("read:", err)
+				return
+			}
+
+			var result map[string]interface{}
+			json.Unmarshal(message, &result)
+
+			params, ok := result["params"].(map[string]interface{})
+			if !ok {
+				fmt.Println("failed to parse params 3")
+				continue
+			}
+			if params != nil {
+				mutex.Lock()
+				currencies[params["symbol"].(string)] = Currency{
+					ID:          idd,
+					FullName:    fullNamee,
+					Ask:         params["ask"].(string),
+					Bid:         params["bid"].(string),
+					Last:        params["last"].(string),
+					Open:        params["open"].(string),
+					Low:         params["low"].(string),
+					High:        params["high"].(string),
+					FeeCurrency: feeCurrencyy,
+				}
+				mutex.Unlock()
+			}
+		}
+	}()
+
+	router := gin.Default()
+	router.GET("/currency/:symbol", getCurrency)
+	router.GET("/currency/all", getAllCurrencies)
+
+	router.Run(":8080")
 }
 
-func handleCurrencySymbol(c *gin.Context) {
+func getCurrency(c *gin.Context) {
 	symbol := c.Param("symbol")
-	// fmt.Println(symbol)
-
-	// symboldata := map[string]interface{}{
-	// 	"method": "getSymbol",
-	// 	"params": map[string]string{
-	// 		"symbol": symbol,
-	// 	},
-	// 	"id": 123,
-	// }
-	// c.WriteJSON(symboldata)
-
-	// Fetch the currency data from the map
-	value, ok := currencyData.Load(symbol)
+	mutex.Lock()
+	currency, ok := currencies[symbol]
+	mutex.Unlock()
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid symbol"})
+		c.JSON(404, gin.H{"message": fmt.Sprintf("Currency with symbol %s not found", symbol)})
 		return
 	}
 
-	currency := value.(Currency)
-	c.JSON(http.StatusOK, currency)
+	c.JSON(200, currency)
 }
 
-func handleCurrencyAll(c *gin.Context) {
-	currencies := make([]Currency, 0)
+func getAllCurrencies(c *gin.Context) {
+	mutex.Lock()
+	allCurrencies := make([]Currency, 0, len(currencies))
+	for _, currency := range currencies {
+		allCurrencies = append(allCurrencies, currency)
+	}
+	mutex.Unlock()
 
-	currencyData.Range(func(key, value interface{}) bool {
-		currencies = append(currencies, value.(Currency))
-		return true
-	})
-
-	c.JSON(http.StatusOK, currencies)
+	c.JSON(200, gin.H{"currencies": allCurrencies})
 }
