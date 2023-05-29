@@ -29,8 +29,6 @@ var mutex = &sync.Mutex{}
 
 func main() {
 	currencies = make(map[string]Currency)
-	// Supported symbols
-	// symbols := []string{"BTCUSD", "ETHBTC"}
 
 	u := url.URL{Scheme: "wss", Host: "api.hitbtc.com", Path: "/api/2/ws"}
 
